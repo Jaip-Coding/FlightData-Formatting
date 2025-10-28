@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Flight List Builder</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:#f5f7fb;color:#0b1220;display:flex;justify-content:center;padding:20px}
+.app{max-width:900px;width:100%;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(10,20,40,0.08);padding:20px}
+h1{margin:0 0 10px;font-size:20px}
+p.lead{margin:0 0 14px;color:#556}
+.image-preview{width:100%;height:240px;background:#eef;border:1px dashed #ccd;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:10px}
+.image-preview img{max-width:100%;max-height:100%;object-fit:contain}
+label{font-weight:600;font-size:14px}
+input{text-transform:uppercase;padding:10px 12px;border-radius:8px;border:1px solid #ccd;font-size:15px;width:100%}
+.inline{display:flex;align-items:center;gap:8px}
+.prefix{padding:10px 12px;border-radius:8px;background:#eef;border:1px solid #ccd;font-weight:700;min-width:64px;text-align:center}
+.actions{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
+.btn{padding:10px 14px;border-radius:8px;background:#0b63ff;color:#fff;border:0;font-weight:700;cursor:pointer}
+.btn.secondary{background:#eef2ff;color:#0b63ff}
+textarea{width:100%;min-height:160px;padding:12px;border-radius:8px;border:1px solid #ccd;font-family:monospace;margin-top:12px}
+.small{font-size:13px;color:#667}
+.colon{font-weight:bold;font-size:18px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Flight List Builder</h1>
+  <p class="lead">Upload one image per flight, then fill in each field (press <b>Enter</b> or wait for auto-advance).</p>
+
+  <label for="images">Choose images</label>
+  <input id="images" type="file" accept="image/*" multiple />
+  <div class="small">Images are handled in upload order.</div>
+
+  <div id="step-area" hidden>
+    <div class="image-preview" id="image-preview"><div class="small">No image selected</div></div>
+    <label id="step-label"></label>
+    <div id="input-wrapper"></div>
+    <div class="actions">
+      <div id="progress-text" class="small"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn secondary" id="prev-btn">Back</button>
+        <button class="btn" id="next-btn">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="unknowns-area" hidden>
+    <h2 style="font-size:16px;margin-top:0">Fill missing information</h2>
+    <div id="unknowns-list"></div>
+    <button class="btn" id="finish-unknowns-btn" style="margin-top:12px">Finish</button>
+  </div>
+
+  <div id="flights-output" hidden>
+    <h2 style="font-size:16px">Result — flights</h2>
+    <textarea id="result-area" readonly></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn" id="copy-btn">Copy</button>
+      <button class="btn secondary" id="download-btn">Download</button>
+      <button class="btn secondary" id="restart-btn">Start over</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Known airline + airport dictionaries */
+const airlines={
+  "LH":{name:"Lufthansa",icao:"DLH"},
+  "BA":{name:"British Airways",icao:"BAW"},
+  "AF":{name:"Air France",icao:"AFR"},
+  "KL":{name:"KLM",icao:"KLM"},
+  "TK":{name:"Turkish Airlines",icao:"THY"},
+  "U2":{name:"easyJet",icao:"EZY"},
+  "DL":{name:"Delta",icao:"DAL"},
+  "AA":{name:"American Airlines",icao:"AAL"},
+  "UA":{name:"United",icao:"UAL"},
+  "LX":{name:"Swiss",icao:"SWR"}
+};
+const airports={
+  "MUC":"Munich","BER":"Berlin","LHR":"London","CDG":"Paris","AMS":"Amsterdam",
+  "ZRH":"Zurich","IST":"Istanbul","JFK":"New York","ORD":"Chicago","ATL":"Atlanta"
+};
+
+let files=[],imagesData=[],flights=[],currentImageIndex=0,currentStep=0;
+let unknownAirlines={},unknownAirports={};
+
+const steps=[
+  {label:"Aircraft type",name:"aircraft"},
+  {label:"Departure airport (IATA code)",name:"departure"},
+  {label:"Arrival airport (IATA code)",name:"arrival"},
+  {label:"Airline (IATA code)",name:"airline"},
+  {label:"ICAO flight number (suffix)",name:"icaoNumber"},
+  {label:"IATA flight number (suffix)",name:"iataNumber"},
+  {label:"Planned departure time",name:"depTime"},
+  {label:"Planned arrival time",name:"arrTime"}
+];
+
+const fileInput=document.getElementById('images');
+const stepArea=document.getElementById('step-area');
+const imagePreview=document.getElementById('image-preview');
+const stepLabel=document.getElementById('step-label');
+const inputWrapper=document.getElementById('input-wrapper');
+const progressText=document.getElementById('progress-text');
+const nextBtn=document.getElementById('next-btn');
+const prevBtn=document.getElementById('prev-btn');
+const unknownsArea=document.getElementById('unknowns-area');
+const unknownsList=document.getElementById('unknowns-list');
+const finishUnknownsBtn=document.getElementById('finish-unknowns-btn');
+const flightsOutput=document.getElementById('flights-output');
+const resultArea=document.getElementById('result-area');
+const copyBtn=document.getElementById('copy-btn');
+const downloadBtn=document.getElementById('download-btn');
+const restartBtn=document.getElementById('restart-btn');
+
+function readFileAsDataURL(f){return new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(f);});}
+
+fileInput.addEventListener('change',async e=>{
+  files=Array.from(e.target.files||[]);
+  if(!files.length)return;
+  imagesData=await Promise.all(files.map(f=>readFileAsDataURL(f)));
+  flights=[];currentImageIndex=0;currentStep=0;stepArea.hidden=false;flightsOutput.hidden=true;
+  renderImage();loadStep();
+});
+
+function renderImage(){imagePreview.innerHTML=`<img src="${imagesData[currentImageIndex]}">`;}
+
+/* STEP RENDERING */
+function loadStep(){
+  const s=steps[currentStep];stepLabel.textContent=s.label;inputWrapper.innerHTML="";
+  const d=flights[currentImageIndex]||(flights[currentImageIndex]={});
+  let el;
+  if(s.name==="icaoNumber"||s.name==="iataNumber"){
+    const prefix=document.createElement('span');
+    prefix.className='prefix';
+    prefix.textContent=(s.name==="icaoNumber"?d.codes?.icao:d.codes?.iata)||"";
+    const inp=document.createElement('input');
+    if(s.name==="iataNumber")inp.inputMode='numeric';
+    el=document.createElement('div');el.className='inline';el.append(prefix,inp);
+  } else if(s.name==="depTime"||s.name==="arrTime"){
+    const wrap=document.createElement('div');wrap.className='inline';
+    const hour=document.createElement('input');hour.inputMode='numeric';hour.placeholder='hh';hour.maxLength=2;
+    const colon=document.createElement('span');colon.className='colon';colon.textContent=':';
+    const min=document.createElement('input');min.inputMode='numeric';min.placeholder='mm';min.maxLength=2;
+    wrap.append(hour,colon,min);el=wrap;
+    const key=s.name==="depTime"?"dep":"arr";
+    hour.addEventListener('input',()=>{if(hour.value.length>=2)min.focus();});
+    min.addEventListener('input',()=>{
+      if(min.value.length>=2){
+        d[key+"Hour"]=hour.value.padStart(2,"0");
+        d[key+"Minute"]=min.value.padStart(2,"0");
+        handleNext();
+      }
+    });
+    setTimeout(()=>hour.focus(),50);
+  } else {
+    el=document.createElement('input');
+    if(["departure","arrival"].includes(s.name))el.inputMode='text';
+    if(["iataNumber"].includes(s.name))el.inputMode='numeric';
+  }
+  inputWrapper.appendChild(el);
+  const inp=el.querySelector('input')||el;
+  inp.focus();inp.value=(d[s.name]||"");
+  const autoLen=s.name==="aircraft"?4: (["departure","arrival"].includes(s.name)?3: (s.name==="airline"?2:null));
+  inp.addEventListener('input',()=>{
+    inp.value=inp.value.toUpperCase();
+    if(autoLen && inp.value.length>=autoLen){d[s.name]=inp.value.trim().toUpperCase();handleNext();}
+  });
+  inp.addEventListener('keydown',e=>{if(e.key==="Enter"){e.preventDefault();d[s.name]=inp.value.trim().toUpperCase();handleNext();}});
+}
+
+/* NAVIGATION */
+nextBtn.onclick=handleNext;prevBtn.onclick=handlePrev;
+function handleNext(){
+  persist();
+  const s=steps[currentStep];const d=flights[currentImageIndex];
+  if(s.name==="airline"){
+    const code=d.airline;
+    if(airlines[code]){d.airlineFull=airlines[code].name;d.codes={icao:airlines[code].icao,iata:code};}
+    else if(unknownAirlines[code]){d.airlineFull=code+"(N/A)";d.codes={icao:unknownAirlines[code].icao,iata:code};}
+    else{
+      const icaoField=document.createElement('input');
+      icaoField.placeholder=`Enter ICAO code for unknown airline ${code}`;
+      icaoField.style.marginTop="10px";icaoField.style.textTransform="uppercase";icaoField.inputMode='text';
+      inputWrapper.appendChild(icaoField);icaoField.focus();
+      icaoField.addEventListener('input',()=>{
+        if(icaoField.value.length>=3){
+          const icao=icaoField.value.trim().toUpperCase();
+          unknownAirlines[code]={icao};
+          d.airlineFull=code+"(N/A)";
+          d.codes={icao,iata:code};
+          handleNext();
+        }
+      });
+      return;
+    }
+  }
+  if(s.name==="departure"||s.name==="arrival"){
+    const code=d[s.name];
+    if(airports[code])d[s.name+"Full"]=airports[code]+"("+code+")";
+    else if(unknownAirports[code])d[s.name+"Full"]=unknownAirports[code]+"("+code+")";
+    else{d[s.name+"Full"]=code+"(N/A)";unknownAirports[code]=null;}
+  }
+  currentStep++;
+  if(currentStep>=steps.length){
+    currentImageIndex++;currentStep=0;
+    if(currentImageIndex<imagesData.length){renderImage();loadStep();}
+    else askUnknowns();
+  } else loadStep();
+}
+function handlePrev(){
+  if(currentStep>0){currentStep--;loadStep();}
+  else if(currentImageIndex>0){currentImageIndex--;currentStep=steps.length-1;renderImage();loadStep();}
+}
+function persist(){const s=steps[currentStep];const inp=inputWrapper.querySelector('input');if(inp)flights[currentImageIndex][s.name]=inp.value.trim().toUpperCase();}
+
+/* UNKNOWN INFO */
+function askUnknowns(){
+  stepArea.hidden=true;
+  unknownsArea.hidden=false;
+  unknownsList.innerHTML="";
+  for(const code in unknownAirports){if(!unknownAirports[code])addUnknownField("airport",code);}
+  for(const code in unknownAirlines){if(!unknownAirlines[code].name)addUnknownField("airline",code);}
+  const first=unknownsList.querySelector('input');if(first)first.focus();
+}
+function addUnknownField(type,code){
+  const wrap=document.createElement('div');wrap.style.marginBottom="10px";
+  const label=document.createElement('label');
+  label.textContent=(type==="airport"?`Enter city for ${code}`:`Enter airline name for ${code}`);
+  const inp=document.createElement('input');
+  inp.type='text';inp.inputMode='text';inp.style.textTransform='none';
+  inp.dataset.type=type;inp.dataset.code=code;
+  inp.addEventListener('keydown',e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      const next=inp.parentElement.nextElementSibling?.querySelector('input');
+      if(next)next.focus();else finishUnknownsBtn.click();
+    }
+  });
+  wrap.append(label,inp);unknownsList.appendChild(wrap);
+}
+finishUnknownsBtn.onclick=()=>{
+  document.querySelectorAll('#unknowns-list input').forEach(inp=>{
+    const code=inp.dataset.code,val=inp.value.trim();
+    if(inp.dataset.type==="airport"&&val){unknownAirports[code]=val;
+      flights.forEach(f=>["departure","arrival"].forEach(p=>{
+        if(f[p]==code)f[p+"Full"]=val+"("+code+")";
+      }));
+    }else if(inp.dataset.type==="airline"&&val){unknownAirlines[code].name=val;
+      flights.forEach(f=>{if(f.airline==code)f.airlineFull=val;});
+    }
+  });
+  showResult();
+};
+
+/* OUTPUT */
+function showResult(){
+  unknownsArea.hidden=true;flightsOutput.hidden=false;
+  const lines=flights.map(f=>{
+    const c=f.codes||{};const icao=(c.icao||"")+(f.icaoNumber||"");
+    const iata=(c.iata||"")+(f.iataNumber||"");
+    return `${f.aircraft||""} ${f.departureFull||""} ${f.arrivalFull||""} ${f.airlineFull||""} ${icao} ${iata} ${String(f.depHour||"00").padStart(2,"0")}:${String(f.depMinute||"00").padStart(2,"0")} ${String(f.arrHour||"00").padStart(2,"0")}:${String(f.arrMinute||"00").padStart(2,"0")}`;
+  });
+  resultArea.value=lines.join("\n");
+}
+
+/* UTILITIES */
+copyBtn.onclick=async()=>{await navigator.clipboard.writeText(resultArea.value);copyBtn.textContent="Copied!";setTimeout(()=>copyBtn.textContent="Copy",1200);};
+downloadBtn.onclick=()=>{const blob=new Blob([resultArea.value],{type:"text/plain"});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download="flights.txt";a.click();};
+restartBtn.onclick=()=>location.reload();
+</script>
+</body>
+</html>
